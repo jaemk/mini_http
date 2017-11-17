@@ -1,17 +1,20 @@
 #![recursion_limit="1024"]
 #[macro_use] extern crate error_chain;
+#[macro_use] extern crate log;
 extern crate mio;
 extern crate slab;
-extern crate httparse;
-extern crate http;
-#[macro_use] extern crate log;
 extern crate threadpool;
 extern crate num_cpus;
+extern crate httparse;
+extern crate http;
+
+#[macro_use] mod macros;
 
 use std::io::{self, Read, Write};
 use std::sync;
 use std::sync::mpsc::{channel, Receiver};
 use mio::net::{TcpListener};
+
 
 error_chain! {
     foreign_links {
@@ -20,7 +23,20 @@ error_chain! {
         AddrParse(::std::net::AddrParseError);
         Http(http::Error);
     }
-    errors {}
+    errors {
+        MalformedHttpRequest(s: String) {
+            description("Malformed HTTP Request")
+            display("MalformedHttpRequest: {}", s)
+        }
+        IncompleteHttpRequest(s: String) {
+            description("Incomplete HTTP Request")
+            display("IncompleteHttpRequest: {}", s)
+        }
+        RequestBodyTooLarge(s: String) {
+            description("Request Body Too Large")
+            display("RequestBodyTooLarge: {}", s)
+        }
+    }
 }
 
 
@@ -132,7 +148,7 @@ impl HttpStreamReader {
     /// TODO: Checking if headers are completely received
     ///       could be improved to avoid scanning the whole
     ///       thing everytime.
-    fn try_build_request(&mut self) -> Option<RequestHead> {
+    fn try_build_request(&mut self) -> Result<Option<RequestHead>> {
         if !self.headers_complete {
             // check if we've got enough data to successfully parse the request
             const R: u8 = '\r' as u8;
@@ -161,7 +177,7 @@ impl HttpStreamReader {
             }
         }
         // if we don't have a complete headers sections, continue waiting
-        if !self.headers_complete { return None }
+        if !self.headers_complete { return Ok(None) }
 
         // if we haven't parsed our request yet, parse the header content into a request and save it
         if self.request.is_none() {
@@ -171,13 +187,12 @@ impl HttpStreamReader {
             let status = match req.parse(header_bytes) {
                 Ok(status) => status,
                 Err(e) => {
-                    panic!("Malformed http request: {:?}\n{:?}",
+                    bail_fmt!(ErrorKind::MalformedHttpRequest, "Malformed http request: {:?}\n{:?}",
                            e, std::str::from_utf8(header_bytes));
                 }
             };
             if status.is_partial() {
-                panic!("HTTP request parser found partial info");
-                // return None
+                bail_fmt!(ErrorKind::IncompleteHttpRequest, "HTTP request parser found partial info");
             }
             debug_assert!(self.headers_length == status.unwrap());
 
@@ -199,13 +214,12 @@ impl HttpStreamReader {
             let bytes_accounted = self.headers_length + self.body_bytes_read;
             self.body_bytes_read = buf_len - bytes_accounted;
             if self.body_bytes_read > self.content_length {
-                // TODO: return a Result instead
-                panic!("Body is larger than stated content-length");
+                bail_fmt!(ErrorKind::RequestBodyTooLarge, "Body is larger than stated content-length");
             }
             self.body_complete = self.body_bytes_read == self.content_length;
         }
-        if !self.body_complete { return None }
-        self.request.take()
+        if !self.body_complete { return Ok(None) }
+        Ok(self.request.take())
     }
 }
 
@@ -351,7 +365,13 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                         if done_reading {
                             request
                         } else {
-                            reader.try_build_request()
+                            match reader.try_build_request() {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    error!("Encountered error while parsing: {:?}", e);
+                                    continue 'next_event
+                                }
+                            }
                         }
                     } else {
                         request
