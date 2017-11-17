@@ -5,6 +5,8 @@ authors = ["James Kominick <james.kominick@gmail.com>"]
 
 [dependencies]
 error-chain = "0.11"
+threadpool = "1"
+num_cpus = "1"
 mio = "0.6"
 slab = "0.4"
 httparse = "1"

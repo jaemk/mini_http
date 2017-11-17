@@ -5,8 +5,12 @@ extern crate slab;
 extern crate httparse;
 extern crate http;
 #[macro_use] extern crate log;
+extern crate threadpool;
+extern crate num_cpus;
 
 use std::io::{self, Read, Write};
+use std::sync;
+use std::sync::mpsc::{channel, Receiver};
 use mio::net::{TcpListener};
 
 error_chain! {
@@ -20,22 +24,82 @@ error_chain! {
 }
 
 
-// pub trait StreamRead {
-//     fn receive_chunk(&mut self, &[u8]) -> usize;
-//     fn parse_update(&mut self) -> Result<()>;
-//     fn is_complete(&self) -> bool;
-//     fn into_request(&mut self) -> Option<http::Request<Vec<u8>>>;
-// }
+/// Represent everything about a request except its (possible) body
+pub type RequestHead = http::Request<()>;
 
-pub type Request = http::Request<Vec<u8>>;
+/// Re-exported `http::Response` for constructing return responses in handlers
+pub use http::Response as HttpResponse;
 
 
+/// Internal `http::Response` wrapper with helpers for constructing the bytes
+/// that needs to be written back a Stream
+struct Response {
+    inner: http::Response<Vec<u8>>,
+    header_data: Vec<u8>
+}
+impl Response {
+    fn new(inner: http::Response<Vec<u8>>) -> Self {
+        Self { inner, header_data: Vec::with_capacity(1024) }
+    }
+    fn serialize_headers(&mut self) {
+        let status = self.inner.status();
+        let s = format!("HTTP/1.1 {} {}\r\n", status.as_str(), status.canonical_reason().unwrap_or("Unsupported Status"));
+        self.header_data.extend_from_slice(&s.as_bytes());
+        for (key, value) in self.inner.headers().iter() {
+            self.header_data.extend_from_slice(key.as_str().as_bytes());
+            self.header_data.extend_from_slice(b": ");
+            self.header_data.extend_from_slice(value.as_bytes());
+            self.header_data.extend_from_slice(b"\r\n");
+        }
+        self.header_data.extend_from_slice(b"\r\n");
+    }
+}
+impl std::ops::Deref for Response {
+    type Target = http::Response<Vec<u8>>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl std::ops::DerefMut for Response {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+
+/// `Request` received and used by handlers. Wraps & `deref`s to an `http::Request`
+/// and patches `Request::body` to return the correct slice of bytes from the
+/// `HttpStreamReader.read_buf`
+pub struct Request {
+    inner: http::Request<Vec<u8>>,
+    body_start: usize,
+}
+impl Request {
+    pub fn body(&self) -> &[u8] {
+        &self.inner.body()[self.body_start..]
+    }
+}
+impl std::ops::Deref for Request {
+    type Target = http::Request<Vec<u8>>;
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+impl std::ops::DerefMut for Request {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.inner
+    }
+}
+
+
+/// Http reader/parser for incrementally reading a request and
+/// parsing its headers
 struct HttpStreamReader {
     read_buf: Vec<u8>,
     header_lines: usize,
     headers_length: usize,
     headers_complete: bool,
-    request: Option<Request>,
+    request: Option<RequestHead>,
 
     content_length: usize,
     body_bytes_read: usize,
@@ -51,9 +115,6 @@ impl std::default::Default for HttpStreamReader {
     }
 }
 impl HttpStreamReader {
-    fn empty() -> Self {
-        Self { ..Self::default() }
-    }
     fn new() -> Self {
         Self {
             read_buf: Vec::with_capacity(1024),
@@ -61,15 +122,19 @@ impl HttpStreamReader {
         }
     }
 
+    /// Save a new chunk of bytes
     fn receive_chunk(&mut self, chunk: &[u8]) -> usize {
         self.read_buf.extend_from_slice(chunk);
         self.read_buf.len()
     }
-    fn parse_update(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn try_build_request(&mut self) -> Option<Request> {
+
+    /// Try parsing the current bytes into request headers
+    /// TODO: Checking if headers are completely received
+    ///       could be improved to avoid scanning the whole
+    ///       thing everytime.
+    fn try_build_request(&mut self) -> Option<RequestHead> {
         if !self.headers_complete {
+            // check if we've got enough data to successfully parse the request
             const R: u8 = '\r' as u8;
             const N: u8 = '\n' as u8;
             let mut header_lines = 0;
@@ -95,54 +160,57 @@ impl HttpStreamReader {
                 self.body_bytes_read += self.read_buf.len() - self.headers_length;
             }
         }
-        debug!("headers: {}, complete: {}", self.header_lines, self.headers_complete);
         // if we don't have a complete headers sections, continue waiting
         if !self.headers_complete { return None }
 
-        // if we haven't parsed our request yet, parse the header content and save it
+        // if we haven't parsed our request yet, parse the header content into a request and save it
         if self.request.is_none() {
             let mut headers = vec![httparse::EMPTY_HEADER; self.header_lines];
             let mut req = httparse::Request::new(&mut headers);
-            debug!("parsing");
-            let status = match req.parse(&self.read_buf[..self.headers_length]) {
+            let header_bytes = &self.read_buf[..self.headers_length];
+            let status = match req.parse(header_bytes) {
                 Ok(status) => status,
                 Err(e) => {
-                    // TODO
-                    panic!("{:?}", e);
+                    panic!("Malformed http request: {:?}\n{:?}",
+                           e, std::str::from_utf8(header_bytes));
                 }
             };
-            debug!("{:?}", status);
             if status.is_partial() {
-                debug!("Partial request");
-                return None
+                panic!("HTTP request parser found partial info");
+                // return None
             }
-            assert!(self.headers_length == status.unwrap());
+            debug_assert!(self.headers_length == status.unwrap());
 
+            // HTTP parsing success. Build an `http::Request`
             let mut request = http::Request::builder();
             request.method(req.method.unwrap());
             request.uri(req.path.unwrap());
+            // TODO: http::Request expects consts and not strs. Defaults to HTTP/1.1 for now
             // request.version(req.version.unwrap());
             for header in req.headers {
                 request.header(header.name, header.value);
             }
-            self.request = Some(request.body(vec![]).unwrap());
+            // use an empty body as a placeholder while we continue to read the request body
+            self.request = Some(request.body(()).unwrap());
         }
 
         if !self.body_complete {
             let buf_len = self.read_buf.len();
             let bytes_accounted = self.headers_length + self.body_bytes_read;
             self.body_bytes_read = buf_len - bytes_accounted;
+            if self.body_bytes_read > self.content_length {
+                // TODO: return a Result instead
+                panic!("Body is larger than stated content-length");
+            }
             self.body_complete = self.body_bytes_read == self.content_length;
         }
         if !self.body_complete { return None }
         self.request.take()
     }
-    fn body(&self) -> &[u8] {
-        &self.read_buf[self.headers_length..]
-    }
 }
 
 
+/// Represent the tcp socket & streams being polled by `mio`
 enum Socket {
     Listener {
         listener: mio::net::TcpListener,
@@ -150,8 +218,10 @@ enum Socket {
     Stream {
         stream: mio::net::TcpStream,
         reader: HttpStreamReader,
-        request: Option<Request>,
-        write_buf: Vec<u8>,
+        request: Option<RequestHead>,
+        done_reading: bool,
+        receiver: Option<Receiver<Response>>,
+        response: Option<Response>,
         bytes_written: usize,
     },
 }
@@ -159,32 +229,48 @@ impl Socket {
     fn new_listener(l: mio::net::TcpListener) -> Self {
         Socket::Listener { listener: l }
     }
+
+    /// Construct a new `Stream` variant accepts from a tcp listener
     fn new_stream(s: mio::net::TcpStream, reader: HttpStreamReader) -> Self {
         Socket::Stream {
             stream: s,
             reader: reader,
             request: None,
-            write_buf: Vec::with_capacity(1024),
+            done_reading: false,
+            receiver: None,
+            response: None,
             bytes_written: 0,
         }
     }
+
+    /// Construct a "continued" stream. Stream reading hasn't been completed yet
     fn continued_stream(stream: mio::net::TcpStream,
                         reader: HttpStreamReader,
-                        request: Option<Request>,
-                        write_buf: Vec<u8>, bytes_written: usize) -> Self
+                        request: Option<RequestHead>,
+                        done_reading: bool,
+                        receiver: Option<Receiver<Response>>,
+                        response: Option<Response>,
+                        bytes_written: usize) -> Self
     {
-        Socket::Stream { stream, reader, request, write_buf, bytes_written }
+        Socket::Stream { stream, reader, request, done_reading, receiver, response, bytes_written }
     }
 }
 
 
-pub fn start() -> Result<()> {
+pub fn start<F>(addr: &str, func: F) -> Result<()>
+    where F: Send + Sync + 'static + Fn(Request) -> HttpResponse<Vec<u8>>
+{
+    let func = sync::Arc::new(func);
+    let pool = threadpool::ThreadPool::new(num_cpus::get() * 2);
+
     let mut sockets = slab::Slab::with_capacity(1024);
-    let addr = "127.0.0.1:3000".parse()?;
+    let addr = addr.parse()?;
     let server = TcpListener::bind(&addr)?;
 
+    // initialize poll
     let poll = mio::Poll::new()?;
     {
+        // register our tcp listener
         let entry = sockets.vacant_entry();
         let server_token = entry.key().into();
         poll.register(&server, server_token,
@@ -203,9 +289,7 @@ pub fn start() -> Result<()> {
             match sockets.remove(token.into()) {
                 Socket::Listener { listener } => {
                     let readiness = e.readiness();
-                    debug!("listener, {:?}, {:?}", token, readiness);
                     if readiness.is_readable() {
-                        debug!("handling listener is readable");
                         let (sock, addr) = listener.accept()?;
                         debug!("opened socket to: {:?}", addr);
 
@@ -225,9 +309,17 @@ pub fn start() -> Result<()> {
                                     mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
                     entry.insert(Socket::new_listener(listener));
                 }
-                Socket::Stream { mut stream, mut reader, mut request, mut write_buf, mut bytes_written } => {
+                Socket::Stream { mut stream, mut reader, request, mut done_reading,
+                                 mut receiver, mut response, mut bytes_written } => {
                     let readiness = e.readiness();
-                    let request = if request.is_none() && readiness.is_readable() {
+
+                    // Try reading and parsing a request from this stream.
+                    // `try_build_request` will return `None` until the request is parsed and the
+                    // body is done being read. After that, `done_reading` will be set
+                    // to `true`. At that point, if this socket is readable, we still need to
+                    // check if it's been closed, but we will no longer try parsing the request
+                    // bytes
+                    let mut request = if readiness.is_readable() {
                         let mut buf = [0; 256];
                         let stream_close = loop {
                             match stream.read(&mut buf) {
@@ -237,35 +329,82 @@ pub fn start() -> Result<()> {
                                 }
                                 Ok(n) => {
                                     reader.receive_chunk(&buf[..n]);
+                                    debug!("read {} bytes", n);
                                 }
                                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                     break false
                                 }
                                 Err(e) => {
-                                    panic!("{:?}", e);
+                                    panic!("Error reading from socket! {:?}", e);
                                 }
                             }
                         };
                         if stream_close {
                             debug!("killing socket: {:?}", token);
-                            continue  // jump to the next mio event
+                            // jump to the next mio event
+                            // TODO: if we have a `receiver` (a handler is running)
+                            //       try shutting it down
+                            continue
                         }
-                        reader.parse_update()?;
-                        reader.try_build_request()
+                        if done_reading {
+                            request
+                        } else {
+                            reader.try_build_request()
+                        }
                     } else {
                         request
                     };
+                    if request.is_some() { done_reading = true; }
+
+                    // Once the request is parsed, this block will execute once.
+                    // The head-only request (RequestHead) will be converted into
+                    // a `Request` and the `HttpStreamReader`s `read_buf` will be
+                    // swapped into the new `Request`s body. The provided
+                    // `func` handler will be started for later retrieval
+                    receiver = if let Some(req) = request.take() {
+                        let (parts, _) = req.into_parts();
+                        let mut body = vec![];
+                        std::mem::swap(&mut body, &mut reader.read_buf);
+                        let request = Request {
+                            inner: http::Request::from_parts(parts, body),
+                            body_start: reader.headers_length,
+                        };
+                        let (send, recv) = channel();
+                        let func = func.clone();
+                        pool.execute(move || {
+                            let resp = func(request);
+                            let mut resp = Response::new(resp);
+                            resp.serialize_headers();
+                            // is sending fails there's nothing we can really do.
+                            // the socket was probably closed
+                            send.send(resp).ok();
+                        });
+                        Some(recv)
+                    } else {
+                        receiver
+                    };
+
+                    // See if a `Response` is available
+                    response = if let Some(ref recv) = receiver {
+                        recv.try_recv().ok()
+                    } else {
+                        None
+                    };
+
+                    // If we have a `Response`, start writing its headers and body
+                    // back to the stream
                     let mut done_write = false;
-                    if let Some(ref request) = request {
+                    if let Some(ref resp) = response {
                         if readiness.is_writable() {
-                            debug!("handling stream is done reading and is writable");
-                            if write_buf.is_empty() {
-                                // debug!("echo: {:?}", std::str::from_utf8(&read_buf)?);
-                                write_buf = b"HTTP/1.1 200 OK\r\nServer: HttpMio\r\n\r\n".to_vec();
-                                write_buf.extend_from_slice(reader.body());
-                            }
+                            debug!("handling: stream is writable");
+                            let header_data_len = resp.header_data.len();
                             loop {
-                                match stream.write(&write_buf[bytes_written..]) {
+                                let (data, read_start) = if bytes_written < header_data_len {
+                                    (&resp.header_data, bytes_written)
+                                } else {
+                                    (resp.body(), bytes_written - header_data_len)
+                                };
+                                match stream.write(&data[read_start..]) {
                                     Ok(0) => {
                                         break
                                     }
@@ -280,9 +419,10 @@ pub fn start() -> Result<()> {
                                     }
                                 }
                             }
-                            done_write = write_buf.len() == bytes_written;
+                            done_write = resp.header_data.len() + resp.body().len() == bytes_written;
                         }
                     }
+
                     if !done_write {
                         // we're not done with this socket yet
                         // reregister stream
@@ -293,8 +433,8 @@ pub fn start() -> Result<()> {
                                         mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
                         entry.insert(
                             Socket::continued_stream(
-                                stream, reader,
-                                request, write_buf, bytes_written
+                                stream, reader, request, done_reading,
+                                receiver, response, bytes_written,
                                 )
                             );
                     }
@@ -302,6 +442,5 @@ pub fn start() -> Result<()> {
             }
         }
     }
-    Ok(())
 }
 
