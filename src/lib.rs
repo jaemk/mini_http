@@ -236,7 +236,6 @@ pub fn start() -> Result<()> {
                                     break true
                                 }
                                 Ok(n) => {
-                                    // read_buf.extend_from_slice(&buf[..n]);
                                     reader.receive_chunk(&buf[..n]);
                                 }
                                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -244,14 +243,12 @@ pub fn start() -> Result<()> {
                                 }
                                 Err(e) => {
                                     panic!("{:?}", e);
-                                    // break false
                                 }
                             }
                         };
                         if stream_close {
-                            // TODO: check for keep-alive
                             debug!("killing socket: {:?}", token);
-                            continue
+                            continue  // jump to the next mio event
                         }
                         reader.parse_update()?;
                         reader.try_build_request()
@@ -265,7 +262,6 @@ pub fn start() -> Result<()> {
                             if write_buf.is_empty() {
                                 // debug!("echo: {:?}", std::str::from_utf8(&read_buf)?);
                                 write_buf = b"HTTP/1.1 200 OK\r\nServer: HttpMio\r\n\r\n".to_vec();
-                                // write_buf.extend_from_slice(&read_buf);
                                 write_buf.extend_from_slice(reader.body());
                             }
                             loop {
@@ -281,7 +277,6 @@ pub fn start() -> Result<()> {
                                     }
                                     Err(e) => {
                                         panic!("{:?}", e);
-                                        // break
                                     }
                                 }
                             }
