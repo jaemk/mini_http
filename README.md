@@ -1,11 +1,13 @@
 # mini_http
+[![Build Status](https://travis-ci.org/jaemk/mini_http.svg?branch=master)](https://travis-ci.org/jaemk/mini_http)
 
 > A basic asynchronous&#42; http server using [`mio`](https://docs.rs/mio)
 
+&#42;While network IO is performed asynchronously, handler functions are executed synchronously in a thread pool.
 
 ## Usage
 
-&#42;While network IO is performed asynchronously, handler functions are executed synchronously in a thread pool.
+See [`examples`](https://github.com/jaemk/mini_http/tree/master/examples)
 
 ```rust
 extern crate mini_http;
