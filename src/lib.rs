@@ -213,7 +213,7 @@ pub fn start() -> Result<()> {
                         let entry = sockets.vacant_entry();
                         let token = entry.key().into();
                         poll.register(&sock, token,
-                                      mio::Ready::readable(),
+                                      mio::Ready::readable() | mio::Ready::writable(),
                                       mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
                         entry.insert(Socket::new_stream(sock, HttpStreamReader::new()));
                     }
@@ -221,7 +221,7 @@ pub fn start() -> Result<()> {
                     let entry = sockets.vacant_entry();
                     let token = entry.key().into();
                     poll.reregister(&listener, token,
-                                    mio::Ready::readable() | mio::Ready::writable(),
+                                    mio::Ready::readable(),
                                     mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
                     entry.insert(Socket::new_listener(listener));
                 }
