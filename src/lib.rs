@@ -296,9 +296,9 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
     info!("** Listening on {} **", addr);
 
     let mut events = mio::Events::with_capacity(1024);
-    'next_event: loop {
+    loop {
         poll.poll(&mut events, None)?;
-        for e in &events {
+        'next_event: for e in &events {
             let token = e.token();
             match sockets.remove(token.into()) {
                 Socket::Listener { listener } => {
