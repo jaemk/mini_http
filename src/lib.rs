@@ -282,7 +282,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
     info!("** Listening on {} **", addr);
 
     let mut events = mio::Events::with_capacity(1024);
-    loop {
+    'next_event: loop {
         poll.poll(&mut events, None)?;
         for e in &events {
             let token = e.token();
@@ -329,22 +329,24 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                 }
                                 Ok(n) => {
                                     reader.receive_chunk(&buf[..n]);
-                                    debug!("read {} bytes", n);
+                                    debug!("Read {} bytes", n);
                                 }
                                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                     break false
                                 }
                                 Err(e) => {
-                                    panic!("Error reading from socket! {:?}", e);
+                                    error!("Encountered error while reading from socket: {:?}", e);
+                                    // let this socket die, jump to the next event
+                                    continue 'next_event
                                 }
                             }
                         };
                         if stream_close {
-                            debug!("killing socket: {:?}", token);
+                            debug!("Stream closed. Killing socket. Token: {:?}", token);
                             // jump to the next mio event
                             // TODO: if we have a `receiver` (a handler is running)
                             //       try shutting it down
-                            continue
+                            continue 'next_event
                         }
                         if done_reading {
                             request
@@ -396,7 +398,6 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                     let mut done_write = false;
                     if let Some(ref resp) = response {
                         if readiness.is_writable() {
-                            debug!("handling: stream is writable");
                             let header_data_len = resp.header_data.len();
                             loop {
                                 let (data, read_start) = if bytes_written < header_data_len {
@@ -410,12 +411,15 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                     }
                                     Ok(n) => {
                                         bytes_written += n;
+                                        debug!("Wrote {} bytes", n);
                                     }
                                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                         break
                                     }
                                     Err(e) => {
-                                        panic!("{:?}", e);
+                                        error!("Encountered error while writing to socket: {:?}", e);
+                                        // let this socket die, jump to the next event
+                                        continue 'next_event
                                     }
                                 }
                             }

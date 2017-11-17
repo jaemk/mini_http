@@ -18,7 +18,7 @@ fn run() -> Result<(), Box<std::error::Error>> {
     ::std::env::set_var("LOG", "info");
 
     mini_http::start("127.0.0.1:3000", |request| {
-        info!("{:?}", std::str::from_utf8(request.body()));
+        info!("request body: {:?}", std::str::from_utf8(request.body()));
         let resp = if request.body().len() > 0 { request.body().to_vec() } else { "hello!".as_bytes().to_vec() };
         mini_http::HttpResponse::builder()
             .status(200)
