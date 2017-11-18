@@ -9,35 +9,14 @@ extern crate httparse;
 extern crate http;
 
 #[macro_use] mod macros;
+mod errors;
 
 use std::io::{self, Read, Write};
 use std::sync;
 use std::sync::mpsc::{channel, Receiver};
 use mio::net::{TcpListener};
+pub use errors::*;
 
-
-error_chain! {
-    foreign_links {
-        Io(::std::io::Error);
-        Utf8(::std::str::Utf8Error);
-        AddrParse(::std::net::AddrParseError);
-        Http(http::Error);
-    }
-    errors {
-        MalformedHttpRequest(s: String) {
-            description("Malformed HTTP Request")
-            display("MalformedHttpRequest: {}", s)
-        }
-        IncompleteHttpRequest(s: String) {
-            description("Incomplete HTTP Request")
-            display("IncompleteHttpRequest: {}", s)
-        }
-        RequestBodyTooLarge(s: String) {
-            description("Request Body Too Large")
-            display("RequestBodyTooLarge: {}", s)
-        }
-    }
-}
 
 
 /// Represent everything about a request except its (possible) body
