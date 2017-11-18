@@ -28,7 +28,7 @@ fn run() -> Result<(), Box<std::error::Error>> {
         } else {
             "Send me data!\n`curl localhost:3000 -i -d 'data'`\n".as_bytes().to_vec()
         };
-        mini_http::HttpResponse::builder()
+        mini_http::Response::builder()
             .status(200)
             .header("X-What-Up", "Nothin")
             .body(resp)
