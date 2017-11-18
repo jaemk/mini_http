@@ -41,9 +41,19 @@ impl ResponseWrapper {
         Self { inner, header_data: Vec::with_capacity(1024) }
     }
     fn serialize_headers(&mut self) {
+        {
+            let body_len = self.inner.body().len();
+            let hdrs = self.inner.headers_mut();
+            hdrs.insert(header::SERVER, header::HeaderValue::from_static("mini-http (rust)"));
+            if body_len > 0 {
+                let len = header::HeaderValue::from_str(&body_len.to_string()).unwrap();
+                hdrs.insert(header::CONTENT_LENGTH, len);
+            }
+        }
         let status = self.inner.status();
         let s = format!("HTTP/1.1 {} {}\r\n", status.as_str(), status.canonical_reason().unwrap_or("Unsupported Status"));
         self.header_data.extend_from_slice(&s.as_bytes());
+
         for (key, value) in self.inner.headers().iter() {
             self.header_data.extend_from_slice(key.as_str().as_bytes());
             self.header_data.extend_from_slice(b": ");
