@@ -18,7 +18,6 @@ use std::sync::mpsc::{channel, Receiver};
 use mio::net::{TcpListener};
 pub use http::header;
 pub use http::method;
-pub use http::request;
 pub use http::response;
 pub use http::status;
 pub use http::uri;
@@ -26,7 +25,6 @@ pub use http::version;
 
 use http_stream::HttpStreamReader;
 pub use errors::*;
-
 
 
 /// Re-exported `http::Response` for constructing return responses in handlers
