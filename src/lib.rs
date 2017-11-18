@@ -15,24 +15,28 @@ use std::io::{self, Read, Write};
 use std::sync;
 use std::sync::mpsc::{channel, Receiver};
 use mio::net::{TcpListener};
+pub use http::header;
+pub use http::method;
+pub use http::request;
+pub use http::response;
+pub use http::status;
+pub use http::uri;
+pub use http::version;
 pub use errors::*;
 
 
 
-/// Represent everything about a request except its (possible) body
-pub type RequestHead = http::Request<()>;
-
 /// Re-exported `http::Response` for constructing return responses in handlers
-pub use http::Response as HttpResponse;
+pub use http::Response;
 
 
 /// Internal `http::Response` wrapper with helpers for constructing the bytes
 /// that needs to be written back a Stream
-struct Response {
+struct ResponseWrapper {
     inner: http::Response<Vec<u8>>,
     header_data: Vec<u8>
 }
-impl Response {
+impl ResponseWrapper {
     fn new(inner: http::Response<Vec<u8>>) -> Self {
         Self { inner, header_data: Vec::with_capacity(1024) }
     }
@@ -49,17 +53,21 @@ impl Response {
         self.header_data.extend_from_slice(b"\r\n");
     }
 }
-impl std::ops::Deref for Response {
+impl std::ops::Deref for ResponseWrapper {
     type Target = http::Response<Vec<u8>>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
 }
-impl std::ops::DerefMut for Response {
+impl std::ops::DerefMut for ResponseWrapper {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
+
+
+/// Represent everything about a request except its (possible) body
+pub(crate) type RequestHead = http::Request<()>;
 
 
 /// `Request` received and used by handlers. Wraps & `deref`s to an `http::Request`
@@ -213,8 +221,8 @@ enum Socket {
         reader: HttpStreamReader,
         request: Option<RequestHead>,
         done_reading: bool,
-        receiver: Option<Receiver<Response>>,
-        response: Option<Response>,
+        receiver: Option<Receiver<ResponseWrapper>>,
+        response: Option<ResponseWrapper>,
         bytes_written: usize,
     },
 }
@@ -241,8 +249,8 @@ impl Socket {
                         reader: HttpStreamReader,
                         request: Option<RequestHead>,
                         done_reading: bool,
-                        receiver: Option<Receiver<Response>>,
-                        response: Option<Response>,
+                        receiver: Option<Receiver<ResponseWrapper>>,
+                        response: Option<ResponseWrapper>,
                         bytes_written: usize) -> Self
     {
         Socket::Stream { stream, reader, request, done_reading, receiver, response, bytes_written }
@@ -251,7 +259,7 @@ impl Socket {
 
 
 pub fn start<F>(addr: &str, func: F) -> Result<()>
-    where F: Send + Sync + 'static + Fn(Request) -> HttpResponse<Vec<u8>>
+    where F: Send + Sync + 'static + Fn(Request) -> Response<Vec<u8>>
 {
     let func = sync::Arc::new(func);
     let pool = threadpool::ThreadPool::new(num_cpus::get() * 2);
@@ -374,7 +382,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                         let func = func.clone();
                         pool.execute(move || {
                             let resp = func(request);
-                            let mut resp = Response::new(resp);
+                            let mut resp = ResponseWrapper::new(resp);
                             resp.serialize_headers();
                             // is sending fails there's nothing we can really do.
                             // the socket was probably closed
@@ -385,14 +393,14 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                         receiver
                     };
 
-                    // See if a `Response` is available
+                    // See if a `ResponseWrapper` is available
                     response = if let Some(ref recv) = receiver {
                         recv.try_recv().ok()
                     } else {
                         None
                     };
 
-                    // If we have a `Response`, start writing its headers and body
+                    // If we have a `ResponseWrapper`, start writing its headers and body
                     // back to the stream
                     let mut done_write = false;
                     if let Some(ref resp) = response {
