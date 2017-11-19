@@ -250,6 +250,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                             match reader.try_build_request() {
                                 Ok(r) => r,
                                 Err(e) => {
+                                    // TODO: return an actual response with proper error-code
                                     error!("Encountered error while parsing: {}", e);
                                     continue 'next_event
                                 }
