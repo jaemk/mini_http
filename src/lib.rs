@@ -215,7 +215,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                     // to `true`. At that point, if this socket is readable, we still need to
                     // check if it's been closed, but we will no longer try parsing the request
                     // bytes
-                    let mut request = if readiness.is_readable() {
+                    let (mut request, err_response): (Option<RequestHead>, Option<ResponseWrapper>) = if readiness.is_readable() {
                         let mut buf = [0; 256];
                         let stream_close = loop {
                             match stream.read(&mut buf) {
@@ -245,21 +245,23 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                             continue 'next_event
                         }
                         if done_reading {
-                            request
+                            (request, None)
                         } else {
                             match reader.try_build_request() {
-                                Ok(r) => r,
+                                Ok(r) => (r, None),
                                 Err(e) => {
-                                    // TODO: return an actual response with proper error-code
+                                    // TODO: return the proper status-code per error
                                     error!("Encountered error while parsing: {}", e);
-                                    continue 'next_event
+                                    (None,
+                                     Some(ResponseWrapper::new(
+                                             Response::builder().status(400).body(b"bad request".to_vec()).unwrap())))
                                 }
                             }
                         }
                     } else {
-                        request
+                        (request, None)
                     };
-                    if request.is_some() { done_reading = true; }
+                    if request.is_some() || err_response.is_some() { done_reading = true; }
 
                     // Once the request is parsed, this block will execute once.
                     // The head-only request (RequestHead) will be converted into
@@ -293,7 +295,11 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                     response = if let Some(ref recv) = receiver {
                         recv.try_recv().ok()
                     } else {
-                        None
+                        if let Some(err_response) = err_response {
+                            Some(err_response)
+                        } else {
+                            None
+                        }
                     };
 
                     // If we have a `ResponseWrapper`, start writing its headers and body
