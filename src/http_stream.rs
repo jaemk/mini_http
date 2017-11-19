@@ -5,6 +5,9 @@ use httparse;
 use {RequestHead};
 use errors::*;
 
+// relevant: https://stackoverflow.com/questions/686217/maximum-on-http-header-values#686243
+const MAX_HEADER_SIZE: usize = 4096;
+
 
 /// Http reader/parser for incrementally reading a request and
 /// parsing its headers
@@ -59,6 +62,9 @@ impl HttpStreamReader {
             for window in data.windows(4) {
                 if window.len() < 4 { break }
                 headers_length += 1;
+                if headers_length > MAX_HEADER_SIZE {
+                    bail_fmt!(ErrorKind::RequestHeadersTooLarge, "Headers are larger than limit: {}", MAX_HEADER_SIZE)
+                }
                 if window == [R, N, R, N] {
                     self.headers_complete = true;
                     break;

@@ -17,6 +17,10 @@ error_chain! {
             description("Incomplete HTTP Request")
             display("IncompleteHttpRequest: {}", s)
         }
+        RequestHeadersTooLarge(s: String) {
+            description("Request Headers Too Large")
+            display("RequestHeadersTooLarge: {}", s)
+        }
         RequestBodyTooLarge(s: String) {
             description("Request Body Too Large")
             display("RequestBodyTooLarge: {}", s)
