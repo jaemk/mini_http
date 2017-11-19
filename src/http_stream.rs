@@ -109,7 +109,20 @@ impl HttpStreamReader {
                 request.header(header.name, header.value);
             }
             // use an empty body as a placeholder while we continue to read the request body
-            self.request = Some(request.body(()).unwrap());
+            let request = request.body(()).unwrap();
+
+            // check for a content-length
+            // at this point the headers have been parsed by httparse, so they should all be
+            // valid values and we can ignore errors from `http::HeaderValue::to_str`
+            self.content_length = {
+                let content_length = request.headers().get(http::header::CONTENT_LENGTH)
+                    .and_then(|val| val.to_str().ok())
+                    .unwrap_or("0");
+                content_length.parse::<usize>()
+                    .chain_err(|| format_err!(ErrorKind::MalformedHttpRequest,
+                                              "Invalid content-length: {}", content_length))?
+            };
+            self.request = Some(request)
         }
 
         if !self.body_complete {
