@@ -4,7 +4,7 @@ extern crate env_logger;
 
 
 fn init_logger() -> Result<(), Box<std::error::Error>> {
-    ::std::env::set_var("LOG", "info"); // default on
+    ::std::env::set_var("LOG", "debug"); // default on
     env_logger::LogBuilder::new()
         .format(|record| {
             format!("[{}] - [{}] -> {}",
