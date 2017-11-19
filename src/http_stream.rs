@@ -10,20 +10,21 @@ use errors::*;
 /// parsing its headers
 pub(crate) struct HttpStreamReader {
     pub read_buf: Vec<u8>,
-    pub header_lines: usize,
     pub headers_length: usize,
-    pub headers_complete: bool,
-    pub request: Option<RequestHead>,
+    header_lines: usize,
+    headers_complete: bool,
+    header_cursor: usize,
+    request: Option<RequestHead>,
 
-    pub content_length: usize,
-    pub body_bytes_read: usize,
-    pub body_complete: bool,
+    content_length: usize,
+    body_bytes_read: usize,
+    body_complete: bool,
 }
 impl std::default::Default for HttpStreamReader {
     fn default() -> HttpStreamReader {
         HttpStreamReader {
             read_buf: Vec::new(),
-            header_lines: 0, headers_length: 0, headers_complete: false, request: None,
+            header_lines: 0, headers_length: 0, headers_complete: false, header_cursor: 0, request: None,
             content_length: 0, body_bytes_read: 0, body_complete: false,
         }
     }
@@ -42,36 +43,40 @@ impl HttpStreamReader {
         self.read_buf.len()
     }
 
-    /// Try parsing the current bytes into request headers
-    /// TODO: Checking if headers are completely received
-    ///       could be improved to avoid scanning the whole
-    ///       thing everytime.
+    /// Try parsing the current bytes into request headers.
+    ///
+    /// After headers are parsed, collect the remaining body bytes.
+    /// After Content-length bytes are parsed, return the parsed request headers.
     pub fn try_build_request(&mut self) -> Result<Option<RequestHead>> {
         if !self.headers_complete {
             // check if we've got enough data to successfully parse the request
-            const R: u8 = '\r' as u8;
-            const N: u8 = '\n' as u8;
-            let mut header_lines = 0;
-            let mut headers_length = 3;
-            let mut headers_complete = false;
-            for window in self.read_buf.windows(4) {
-                if window.len() < 4 { break; }
+            const R: u8 = b'\r';
+            const N: u8 = b'\n';
+            // slide back 3 spaces in case the previous chunk ended with "\r\n\r"
+            let cursor = if self.header_cursor >= 3 { self.header_cursor - 3 } else { 0 };
+            let mut headers_length = if self.headers_length < 4 { 3 } else { self.headers_length - 3 };
+            let data = &self.read_buf[cursor..];
+            for window in data.windows(4) {
+                if window.len() < 4 { break }
                 headers_length += 1;
-                if window[..2] == [R, N] {
-                    header_lines += 1;
-                }
                 if window == [R, N, R, N] {
-                    headers_complete = true;
+                    self.headers_complete = true;
                     break;
                 }
+                if window[..2] == [R, N] {
+                    self.header_lines += 1;
+                }
             }
-            self.header_lines = header_lines;
             self.headers_length = headers_length;
-            self.headers_complete = headers_complete;
+            self.header_cursor = headers_length - 1;
 
-            // account for body contents that may have come in with this final headers read
             if self.headers_complete {
+                debug!("headers complete: {}, {:?}",
+                       self.headers_length, std::str::from_utf8(&self.read_buf[..self.headers_length]));
+                // account for body contents that may have come in with this final headers read
                 self.body_bytes_read += self.read_buf.len() - self.headers_length;
+                debug!("trailing body bytes read: {}, {:?}",
+                       self.body_bytes_read, std::str::from_utf8(&self.read_buf[self.headers_length..]));
             }
         }
         // if we don't have a complete headers sections, continue waiting
@@ -108,11 +113,8 @@ impl HttpStreamReader {
         }
 
         if !self.body_complete {
-            let buf_len = self.read_buf.len();
-            let bytes_accounted = self.headers_length + self.body_bytes_read;
-            self.body_bytes_read = buf_len - bytes_accounted;
             if self.body_bytes_read > self.content_length {
-                bail_fmt!(ErrorKind::RequestBodyTooLarge, "Body is larger than stated content-length");
+                bail_fmt!(ErrorKind::RequestBodyTooLarge, "Body is larger than stated content-length: {}", self.content_length);
             }
             self.body_complete = self.body_bytes_read == self.content_length;
         }
