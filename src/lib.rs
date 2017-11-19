@@ -46,6 +46,8 @@ impl ResponseWrapper {
             let body_len = self.inner.body().len();
             let hdrs = self.inner.headers_mut();
             hdrs.insert(header::SERVER, header::HeaderValue::from_static("mini-http (rust)"));
+            // `Connection: close` is required until we properly handle keep-alive!
+            hdrs.insert(header::CONNECTION, header::HeaderValue::from_static("close"));
             if body_len > 0 {
                 let len = header::HeaderValue::from_str(&body_len.to_string()).unwrap();
                 hdrs.insert(header::CONTENT_LENGTH, len);
