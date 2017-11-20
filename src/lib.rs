@@ -46,8 +46,8 @@ impl ResponseWrapper {
             let body_len = self.inner.body().len();
             let hdrs = self.inner.headers_mut();
             hdrs.insert(header::SERVER, header::HeaderValue::from_static("mini-http (rust)"));
-            // `Connection: close` is required until we properly handle keep-alive!
-            hdrs.insert(header::CONNECTION, header::HeaderValue::from_static("close"));
+            // TODO: `Connection: close` is required until we properly handle keep-alive!
+            // hdrs.insert(header::CONNECTION, header::HeaderValue::from_static("close"));
             if body_len > 0 {
                 let len = header::HeaderValue::from_str(&body_len.to_string()).unwrap();
                 hdrs.insert(header::CONTENT_LENGTH, len);
@@ -115,6 +115,7 @@ enum Socket {
     },
     Stream {
         stream: mio::net::TcpStream,
+        keep_alive: bool,
         reader: HttpStreamReader,
         request: Option<RequestHead>,
         done_reading: bool,
@@ -132,6 +133,7 @@ impl Socket {
     fn new_stream(s: mio::net::TcpStream, reader: HttpStreamReader) -> Self {
         Socket::Stream {
             stream: s,
+            keep_alive: true,
             reader: reader,
             request: None,
             done_reading: false,
@@ -143,6 +145,7 @@ impl Socket {
 
     /// Construct a "continued" stream. Stream reading hasn't been completed yet
     fn continued_stream(stream: mio::net::TcpStream,
+                        keep_alive: bool,
                         reader: HttpStreamReader,
                         request: Option<RequestHead>,
                         done_reading: bool,
@@ -150,7 +153,7 @@ impl Socket {
                         response: Option<ResponseWrapper>,
                         bytes_written: usize) -> Self
     {
-        Socket::Stream { stream, reader, request, done_reading, receiver, response, bytes_written }
+        Socket::Stream { stream, keep_alive, reader, request, done_reading, receiver, response, bytes_written }
     }
 }
 
@@ -207,7 +210,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                     mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
                     entry.insert(Socket::new_listener(listener));
                 }
-                Socket::Stream { mut stream, mut reader, request, mut done_reading,
+                Socket::Stream { mut stream, mut keep_alive, mut reader, request, mut done_reading,
                                  mut receiver, mut response, mut bytes_written } => {
                     let readiness = e.readiness();
 
@@ -278,6 +281,11 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                             inner: http::Request::from_parts(parts, body),
                             body_start: reader.headers_length,
                         };
+                        keep_alive = {
+                            request.headers().get(header::CONNECTION)
+                                .map(|v| v == "keep-alive")
+                                .unwrap_or(keep_alive)
+                        };
                         let (send, recv) = channel();
                         let func = func.clone();
                         pool.execute(move || {
@@ -339,7 +347,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                     }
 
                     if !done_write {
-                        // we're not done with this socket yet
+                        // we're not done writing our response to this socket yet
                         // reregister stream
                         let entry = sockets.vacant_entry();
                         let token = entry.key().into();
@@ -348,10 +356,19 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                         mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
                         entry.insert(
                             Socket::continued_stream(
-                                stream, reader, request, done_reading,
+                                stream, keep_alive, reader, request, done_reading,
                                 receiver, response, bytes_written,
                                 )
                             );
+                    } else if keep_alive {
+                        // we're done writing, but we need to keep the socket open and reuse it
+                        debug!("Reusing stream");
+                        let entry = sockets.vacant_entry();
+                        let token = entry.key().into();
+                        poll.reregister(&stream, token,
+                                        mio::Ready::readable() | mio::Ready::writable(),
+                                        mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
+                        entry.insert(Socket::new_stream(stream, HttpStreamReader::new()));
                     }
                 }
             }
