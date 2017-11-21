@@ -2,7 +2,7 @@
 ## mini_http
 
 
-## Example
+## Basic Example
 
 ```rust
 # fn run() -> Result<(), Box<::std::error::Error>> {
@@ -17,6 +17,8 @@ mini_http::Server::new("127.0.0.1:3002")?
 # }
 ```
 
+Note: If you're experiencing poor performance on benchmarks, see
+[`tcp_nodelay`](struct.Server.html#method.tcp_nodelay)
 */
 
 #![recursion_limit="1024"]
@@ -219,7 +221,7 @@ impl Server {
     /// buffered until there is a sufficient amount to send out,
     /// thereby avoiding the frequent sending of small packets.
     ///
-    /// Note: `tcp_delay(true)` will **significantly** improve performance
+    /// Note: `tcp_nodelay(true)` will **significantly** improve performance
     ///        for benchmarking loads, but may not be necessary for real world usage.
     ///        For example on my laptop, `wrk -t2 -c100` increases from 2.5k to 92k req/s.
     pub fn tcp_nodelay(&mut self, no_delay: bool) -> &mut Self {
