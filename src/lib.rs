@@ -81,7 +81,7 @@ impl std::ops::DerefMut for ResponseWrapper {
 
 
 /// Represent everything about a request except its (possible) body
-pub(crate) type RequestHead = http::Request<()>;
+type RequestHead = http::Request<()>;
 
 
 /// `Request` received and used by handlers. Wraps & `deref`s to an `http::Request`
@@ -172,7 +172,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
     where F: Send + Sync + 'static + Fn(Request) -> Response<Vec<u8>>
 {
     let func = sync::Arc::new(func);
-    let pool = threadpool::ThreadPool::new(num_cpus::get() * 2);
+    let pool = threadpool::ThreadPool::new(num_cpus::get() * 8);
 
     let mut sockets = slab::Slab::with_capacity(1024);
     let addr = addr.parse()?;
@@ -240,20 +240,23 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                 }
                                 Ok(n) => {
                                     reader.receive_chunk(&buf[..n]);
-                                    debug!("Read {} bytes", n);
+                                    debug!("{:?} - Read {} bytes", token, n);
                                 }
                                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                     break false
                                 }
+                                Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => {
+                                    break false
+                                }
                                 Err(e) => {
-                                    error!("Encountered error while reading from socket: {:?}", e);
+                                    error!("{:?} - Encountered error while reading from socket: {:?}", token, e);
                                     // let this socket die, jump to the next event
                                     continue 'next_event
                                 }
                             }
                         };
                         if stream_close {
-                            debug!("Stream closed. Killing socket. Token: {:?}", token);
+                            debug!("{:?} - Stream closed. Killing socket.", token);
                             // jump to the next mio event
                             // TODO: if we have a `receiver` (a handler is running)
                             //       try shutting it down
@@ -266,7 +269,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                 Ok(r) => (r, None),
                                 Err(e) => {
                                     // TODO: return the proper status-code per error
-                                    error!("Encountered error while parsing: {}", e);
+                                    error!("{:?} - Encountered error while parsing: {}", token, e);
                                     (None,
                                      Some(ResponseWrapper::new(
                                              Response::builder().status(400).body(b"bad request".to_vec()).unwrap())))
@@ -280,7 +283,7 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
 
                     // Once the request is parsed, this block will execute once.
                     // The head-only request (RequestHead) will be converted into
-                    // a `Request` and the `HttpStreamReader`s `read_buf` will be
+                    // a public `Request` and the `HttpStreamReader`s `read_buf` will be
                     // swapped into the new `Request`s body. The provided
                     // `func` handler will be started for later retrieval
                     receiver = if let Some(req) = request.take() {
@@ -312,14 +315,15 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                             }
                         }
 
+                        // Kick-off the handler
                         let (send, recv) = channel();
                         let func = func.clone();
                         pool.execute(move || {
                             let resp = func(request);
                             let mut resp = ResponseWrapper::new(resp);
                             resp.serialize_headers();
-                            // is sending fails there's nothing we can really do.
-                            // the socket was probably closed
+                            // If sending fails there's nothing we can really do.
+                            // The socket was probably closed and its receiver dropped
                             send.send(resp).ok();
                         });
                         Some(recv)
@@ -363,13 +367,13 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                 match stream.write(&data[read_start..]) {
                                     Ok(n) => {
                                         bytes_written += n;
-                                        debug!("Wrote {} bytes", n);
+                                        debug!("{:?} - Wrote {} bytes", token, n);
                                     }
                                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
                                         break 'write
                                     }
                                     Err(e) => {
-                                        error!("Encountered error while writing to socket: {:?}", e);
+                                        error!("{:?} - Encountered error while writing to socket: {:?}", token, e);
                                         // let this socket die, jump to the next event
                                         continue 'next_event
                                     }
@@ -394,13 +398,15 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                             );
                     } else if keep_alive {
                         // we're done writing, but we need to keep the socket open and reuse it
-                        debug!("Reusing stream");
+                        debug!("{:?} - Reusing stream", token);
                         let entry = sockets.vacant_entry();
                         let token = entry.key().into();
                         poll.reregister(&stream, token,
                                         mio::Ready::readable() | mio::Ready::writable(),
                                         mio::PollOpt::edge() | mio::PollOpt::oneshot())?;
                         entry.insert(Socket::new_stream(stream, HttpStreamReader::new(), SocketStatus::Reused));
+                    } else {
+                        debug!("{:?} - Done writing, killing socket", token);
                     }
                 }
             }
