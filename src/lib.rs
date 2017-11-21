@@ -318,22 +318,29 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                     if let Some(ref resp) = response {
                         if readiness.is_writable() {
                             let header_data_len = resp.header_data.len();
-                            loop {
+                            let body_len = resp.body().len();
+                            let total_len = header_data_len + body_len;
+                            'write: loop {
                                 let (data, read_start) = if bytes_written < header_data_len {
                                     (&resp.header_data, bytes_written)
-                                } else {
+                                } else if bytes_written < total_len {
                                     (resp.body(), bytes_written - header_data_len)
+                                } else {
+                                    done_write = true;
+                                    debug!("{:?} - flushing", token);
+                                    // If flushing fails, something bad probably happened.
+                                    // If it didn't fail because of a connection error (connection
+                                    // is still alive), it will eventually be flushed by the os
+                                    stream.flush().ok();
+                                    break 'write
                                 };
                                 match stream.write(&data[read_start..]) {
-                                    Ok(0) => {
-                                        break
-                                    }
                                     Ok(n) => {
                                         bytes_written += n;
                                         debug!("Wrote {} bytes", n);
                                     }
                                     Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                                        break
+                                        break 'write
                                     }
                                     Err(e) => {
                                         error!("Encountered error while writing to socket: {:?}", e);
@@ -342,7 +349,6 @@ pub fn start<F>(addr: &str, func: F) -> Result<()>
                                     }
                                 }
                             }
-                            done_write = resp.header_data.len() + resp.body().len() == bytes_written;
                         }
                     }
 
