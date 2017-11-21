@@ -2,6 +2,15 @@
 name = "mini_http"
 version = "0.1.0"
 authors = ["James Kominick <james.kominick@gmail.com>"]
+description = "Simple HTTP server built on mio"
+documentation = "https://docs.rs/mini_http"
+readme = "README.md"
+keywords = ["web"]
+categories = ["web-programming::http-server", "asynchronous"]
+license = "MIT"
+
+[badges]
+travis-ci = { repository = "jaemk/mini_http", branch = "master" }
 
 [dependencies]
 error-chain = "0.11"
