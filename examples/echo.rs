@@ -4,7 +4,7 @@ extern crate env_logger;
 
 
 fn init_logger() -> Result<(), Box<std::error::Error>> {
-    ::std::env::set_var("LOG", "info");
+    // ::std::env::set_var("LOG", "info");
     env_logger::LogBuilder::new()
         .format(|record| {
             format!("[{}] - [{}] -> {}",
@@ -20,7 +20,7 @@ fn init_logger() -> Result<(), Box<std::error::Error>> {
 
 
 fn run() -> Result<(), Box<std::error::Error>> {
-    // init_logger()?;  // uncomment to enable logging
+    init_logger()?;
     mini_http::Server::new("127.0.0.1:3000")?
         .tcp_nodelay(true)
         .start(|request| {
