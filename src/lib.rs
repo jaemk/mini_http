@@ -323,12 +323,12 @@ impl Server {
                                         break false
                                     }
                                     Err(ref e) if e.kind() == io::ErrorKind::ConnectionReset => {
-                                        break false
+                                        break true
                                     }
                                     Err(e) => {
                                         error!("{:?} - Encountered error while reading from socket: {:?}", token, e);
                                         // let this socket die, jump to the next event
-                                        continue 'next_event
+                                        break true
                                     }
                                 }
                             };
