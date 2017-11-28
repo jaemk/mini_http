@@ -39,6 +39,7 @@ use std::io::{self, Read, Write};
 use std::sync;
 use std::sync::mpsc::{channel, Receiver};
 use std::time;
+use std::thread;
 use std::net;
 use std::ascii::AsciiExt;
 use mio::net::{TcpListener};
@@ -192,6 +193,34 @@ impl Socket {
 }
 
 
+enum Thread {
+    Pooled {
+        pool: threadpool::ThreadPool,
+    },
+    Threaded,
+}
+impl Thread {
+    fn new(size: usize) -> Self {
+        if size > 0 {
+            Thread::Pooled { pool: threadpool::ThreadPool::new(size) }
+        } else {
+            Thread::Threaded
+        }
+    }
+
+    fn execute<F: FnOnce() + Send + 'static>(&self, f: F) {
+        match self {
+            &Thread::Pooled { ref pool } => {
+                pool.execute(f);
+            }
+            &Thread::Threaded => {
+                thread::spawn(f);
+            }
+        }
+    }
+}
+
+
 pub struct Server {
     addr: net::SocketAddr,
     no_delay: bool,
@@ -231,7 +260,8 @@ impl Server {
 
     /// Configure the size of the thread pool that's used for executing handlers
     ///
-    /// Defaults to `num_cpus * 8`
+    /// Defaults to `num_cpus * 8`. If zero is specified, unlimited threads will
+    /// be spawned instead of using a thread pool.
     pub fn pool_size(&mut self, pool_size: usize) -> &mut Self {
         self.pool_size = pool_size;
         self
@@ -250,7 +280,7 @@ impl Server {
         where F: Send + Sync + 'static + Fn(Request) -> Response<Vec<u8>>
     {
         let func = sync::Arc::new(func);
-        let pool = threadpool::ThreadPool::new(self.pool_size);
+        let pool = Thread::new(self.pool_size);
 
         let mut sockets = slab::Slab::with_capacity(1024);
         let server = TcpListener::bind(&self.addr)?;
