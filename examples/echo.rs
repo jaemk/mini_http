@@ -5,16 +5,17 @@ extern crate env_logger;
 
 fn init_logger() -> Result<(), Box<std::error::Error>> {
     // ::std::env::set_var("LOG", "info");
-    env_logger::LogBuilder::new()
-        .format(|record| {
-            format!("[{}] - [{}] -> {}",
+    use std::io::Write;
+    env_logger::Builder::new()
+        .format(|buf, record| {
+            writeln!(buf, "[{}] - [{}] -> {}",
                 record.level(),
-                record.location().module_path(),
+                record.module_path().unwrap_or("<unkown>"),
                 record.args()
                 )
             })
         .parse(&::std::env::var("LOG").unwrap_or_default())
-        .init()?;
+        .init();
     Ok(())
 }
 
